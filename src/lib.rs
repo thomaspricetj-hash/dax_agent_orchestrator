@@ -27,20 +27,32 @@ pub use crate::traits::{
 };
 
 // ============================================================================
-// DAX ORCHESTRATION PIPELINE (ONLY WHAT EXISTS IN THIS PROJECT)
+// DAX ORCHESTRATION PIPELINE (FULL MAX‑TIER EXPORTS)
 // ============================================================================
 
 pub use crate::dax::{
+    // Strategies
     SplitStrategy,
     CollapseStrategy,
 
-    // These DO exist in your agent project's dax.rs
+    // Max‑Tier Production Mode
+    DaxTier,
+    DaxTelemetry,
+    DaxLedger,        // <-- PATCH: Ledger now exported
+
+    // Split pipeline
     dax_split,
     dax_split_fractal,
     dax_expand_fractal,
+
+    // Execution pipeline
     dax_execute_sync,
     dax_execute_async,
+
+    // Collapse pipeline
     dax_collapse,
+
+    // Full orchestration (now returns ledger)
     dax_run_sync,
     dax_run_async,
 };

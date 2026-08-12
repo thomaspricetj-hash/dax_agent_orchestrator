@@ -1,213 +1,244 @@
-DAX Agent Orchestrator – Install & Integration Guide
+============================================================
+DAX Agent Orchestrator – Max‑Tier Install & Integration Guide
+============================================================
 
 Overview
-A concise, practical guide to installing and integrating the DAX Agent Orchestrator into an existing Rust agent. This covers dependency setup, feature flags, required trait implementations, example usage for splitting/executing/collapsing, testing, CI recommendations, and common troubleshooting steps.
+A complete guide for installing and integrating the Max‑Tier DAX Agent Orchestrator into a Rust host agent. Covers dependency setup, feature flags, required trait implementations, tier configuration, ledger and telemetry usage, sync/async orchestration, testing, CI, and troubleshooting.
+
+This guide reflects the full Max‑Tier upgrade including:
+
+DaxLedger (provenance tracking)
+
+DaxTelemetry (heatmaps, influence edges, collapse order)
+
+Tier‑aware split/collapse strategies
+
+Weighted collapse
+
+Fractal expansion
+
+Updated return signatures
+
+Updated exports in lib.rs
+
+Updated example host agent
 
 Add dependency
 
-Step 1 — Add the crate to your Cargo.toml
-
 If using crates.io:
-
 [dependencies]
 dax_agent_orchestrator = "0.2"
 
-If developing locally and the orchestrator is in a sibling folder:
-
+If developing locally:
 [dependencies]
 dax_agent_orchestrator = { path = "../dax_agent_orchestrator" }
 
-Step 2 — Enable features you need
+Enable features
 
-Common features:
+with-async
+Enables Tokio-backed parallel execution.
 
-with-async   Enables Tokio-backed parallel runner and async helpers.
-with-serde   Enables optional JSON payload support in Task.
+with-serde
+Enables JSON payload support in Task.
 
-Example enabling both:
-
+Example:
 [dependencies.dax_agent_orchestrator]
 version = "0.2"
 features = ["with-async", "with-serde"]
 
-Feature flags and runtime requirements
-
-with-async
-Use this when your host uses Tokio or you want the Tokio-backed run_subagents_parallel.
-
-Your binary must depend on Tokio:
-
+Tokio requirement when using async:
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
-If you do not enable with-async, the library falls back to a thread-based parallel runner.
-
-with-serde
-Enables Task structured payload support.
-
-Add serde if you plan to use JSON payloads:
-
+Serde requirement when using JSON payloads:
 serde = { version = "1", features = ["derive"] }
 
-Example host binary Cargo.toml:
+Max‑Tier API Exports
 
-[dependencies]
-dax_agent_orchestrator = { version = "0.2", features = ["with-async", "with-serde"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde = { version = "1", features = ["derive"] }
+Your lib.rs must export:
 
-Implementing the required traits
+SplitStrategy
+CollapseStrategy
+DaxTier
+DaxTelemetry
+DaxLedger
+dax_run_sync
+dax_run_async
+dax_split
+dax_execute_sync
+dax_execute_async
+dax_collapse
 
-You must implement AgentState, define concrete Delta types, and implement an executor.
+These are required for Max‑Tier orchestration.
 
-Implement AgentState
+Implement required traits
 
-use dax_agent_orchestrator::traits::{AgentState, DeltaState};
+AgentState
+Your state must implement:
+apply_delta(&mut self, delta: &dyn DeltaState)
 
-#[derive(Clone, Debug)]
-struct MyState { /* fields */ }
+DeltaState
+Any Send + Debug + Any + 'static type automatically implements DeltaState.
 
-impl AgentState for MyState {
-fn apply_delta(&mut self, delta: &dyn DeltaState) {
-if let Some(d) = delta.as_any().downcast_ref::<MyDelta>() {
-self.counter += d.delta;
-} else {
-// handle unknown delta types
-}
-}
-}
-
-Define concrete delta types
-
-#[derive(Debug)]
+Example delta:
 struct MyDelta { delta: i64 }
 
-This automatically implements DeltaState because it satisfies Send + Debug + Any + 'static.
+Executor (sync):
+run(&self, state, task) -> Box<dyn DeltaState + Send>
 
-Implement an executor
+Executor (async):
+run_async(&self, state, task) -> Future returning Box<dyn DeltaState + Send>
 
-Synchronous executor:
+Max‑Tier orchestration flow
 
-use dax_agent_orchestrator::traits::{AgentExecutor, Task};
+The Max‑Tier orchestrator returns:
 
-struct MyExecutor;
+Sync:
+(new_master, telemetry, ledger)
 
-impl AgentExecutor<MyState> for MyExecutor {
-fn run(&self, state: MyState, task: Task) -> Box<dyn DeltaState + Send> {
-Box::new(MyDelta { delta: 1 })
-}
-}
+Async:
+(new_master, telemetry, ledger)
 
-Async executor (optional):
+Telemetry includes:
+agent_heat
+delta_heat
+influence_edges
+collapse_order
 
-use dax_agent_orchestrator::traits::AgentExecutorAsync;
-use std::pin::Pin;
-use std::future::Future;
+Ledger includes:
+agent_id
+task_name
+delta_type
+delta_value
+depth
+cost
+collapse_position
+influenced
+timestamp
 
-struct MyAsyncExecutor;
+Split → Execute → Collapse (Max‑Tier)
 
-impl AgentExecutorAsync<MyState> for MyAsyncExecutor {
-type Fut = Pin<Box<dyn Future<Output = Box<dyn DeltaState + Send>> + Send>>;
+Split:
+specs = dax_split(agent, &master, split_strategy, tasks, |s, i| s.clone())
 
-fn run_async(&self, state: MyState, task: Task) -> Self::Fut {
-Box::pin(async move {
-Box::new(MyDelta { delta: 1 })
-})
-}
-}
+Execute (sync):
+(results, telemetry, ledger) = dax_execute_sync(specs, executor)
 
-Running the split → execute → collapse flow
+Execute (async):
+(results, telemetry, ledger) = dax_execute_async(specs, executor).await
 
-Split into SubAgentSpecs
+Collapse:
+new_master = dax_collapse(master, results, collapse_strategy, &mut telemetry, &mut ledger)
 
-use dax_agent_orchestrator::{split, SplitStrategy, SubAgentSpec, Task};
+Tier configuration
 
-let master: MyState = /* ... */;
-let tasks = vec![
-Task::new("t1", "payload1"),
-Task::new("t2", "payload2"),
-];
+Tier1Basic
+Sequential collapse
 
-let specs: Vec<SubAgentSpec<MyState>> =
-split(&master, SplitStrategy::SemanticRouting, tasks, |s, _i| s.clone());
+Tier2Weighted
+Weighted collapse
 
-Run subagents synchronously
+Tier3Adaptive
+Semantic routing + host collapse
 
-use dax_agent_orchestrator::run_subagents_local;
+Tier4FractalBoost
+Semantic routing + weighted collapse + fractal expansion
 
-let exec = MyExecutor;
-let results = run_subagents_local(specs, &exec);
+Tier5Cognitive
+Full Max‑Tier mode:
 
-Run subagents in parallel (Tokio)
+Semantic routing
 
-use dax_agent_orchestrator::run_subagents_parallel;
-use std::sync::Arc;
+Weighted collapse
 
-let exec_arc = Arc::new(MyExecutor);
-let results = run_subagents_parallel(specs, exec_arc).await;
+Fractal expansion
 
-Collapse deltas back into master
+Telemetry
 
-use dax_agent_orchestrator::{collapse_from_id_pairs, CollapseStrategy};
+Ledger
 
-let id_and_deltas: Vec<(String, Box<dyn DeltaState + Send>)> =
-results.into_iter().map(|r| (r.id, r.delta)).collect();
+Influence tracking
 
-let new_master =
-collapse_from_id_pairs(master, id_and_deltas, CollapseStrategy::Sequential);
+Collapse position tracking
 
-Custom merge logic
+Example Max‑Tier host usage
 
-use dax_agent_orchestrator::collapse_with;
+(new_master, telemetry, ledger) = dax_run_sync(
+&agent,
+&executor,
+master,
+tasks,
+SplitStrategy::SemanticRouting,
+CollapseStrategy::Weighted,
+DaxTier::Tier5Cognitive,
+|s, _| s.clone(),
+);
 
-let merged = collapse_with(master, deltas_with_ids, |master, delta, id_opt| {
-// custom merge logic using id_opt and delta downcast
-});
+Print telemetry:
+telemetry.agent_heat
+telemetry.delta_heat
+telemetry.influence_edges
+telemetry.collapse_order
 
-Testing, CI, and troubleshooting
+Print ledger:
+ledger.entries
 
-Run tests locally:
+Testing and CI
 
+Local tests:
 cargo test
 
-Run async tests:
-
+Async tests:
 cargo test --features "with-async"
 
-Run ignored tests:
+Serde tests:
+cargo test --features "with-serde"
 
-cargo test -- --ignored
-
-Run doctests:
-
-cargo test --doc
-
-CI recommendations:
-
-Matrix builds:
+CI matrix:
 cargo test
 cargo test --features "with-async"
 cargo test --features "with-serde"
 
-Linting:
+Lint:
 cargo clippy --all-targets --all-features -- -D warnings
 
-Format check:
+Format:
 cargo fmt -- --check
 
-Common troubleshooting
+Troubleshooting
 
-Downcast returns None:
-Ensure the delta type matches the executor’s output and implements Send + Debug + Any + 'static.
+Downcast returns None
+Delta type mismatch. Ensure executor returns the correct concrete delta.
 
-Feature-gated tests skipped:
-Enable required features on the cargo test command line.
+Tokio runtime errors
+Binary must include Tokio and with-async must be enabled.
 
-Tokio runtime errors:
-Ensure your binary includes Tokio and with-async is enabled.
+Missing ledger or telemetry
+Ensure lib.rs exports DaxLedger and DaxTelemetry.
 
-Unused import warnings:
-Conditionally import async helpers using #[cfg(feature = "with-async")].
+Unused imports
+Use #[cfg(feature = "with-async")] for async-only imports.
 
-Panics in tests:
-Inspect unwrap() calls; prefer graceful error handling or assert messages.
+Collapse order incorrect
+Ensure collapse_strategy matches tier configuration.
 
+Influence edges empty
+Weighted collapse or Tier5Cognitive must be enabled.
+
+Recommended host architecture
+
+Use lightweight scoped states.
+Use semantic routing for meaningful splits.
+Use weighted collapse for confidence-based merging.
+Use ledger for provenance and debugging.
+Use telemetry for performance tuning.
+Use fractal expansion for recursive reasoning.
+
+Roadmap
+
+Planned enhancements:
+Provenance-aware merging
+Priority-based scheduling
+Typed delta registries
+Observability hooks
+Language bindings (Python, JS, gRPC)
+Predictive Tier‑6 routing

@@ -7,7 +7,8 @@
 use dax_agent_orchestrator as orchestrator;
 use orchestrator::{
     Agent, AgentState, DeltaState, MicroAgent, FractalAgent, FractalConfig,
-    Task, SplitStrategy, CollapseStrategy,
+    Task, SplitStrategy, CollapseStrategy, DaxTier,
+    DaxTelemetry, DaxLedger,        // <-- PATCH: Ledger now imported
 };
 
 #[cfg(not(feature = "with-async"))]
@@ -156,17 +157,27 @@ async fn main() {
         Task::new("root", "1"),
     ];
 
-    let new_master = dax_run_async(
-        &agent,
-        executor,
-        master,
-        tasks,
-        SplitStrategy::SemanticRouting,
-        CollapseStrategy::Sequential,
-        |s, _| s.clone(),
-    ).await;
+    // --- MAX‑TIER: returns (state, telemetry, ledger) ---
+    let (new_master, telemetry, ledger): (SimpleState, DaxTelemetry, DaxLedger) =
+        dax_run_async(
+            &agent,
+            executor,
+            master,
+            tasks,
+            SplitStrategy::SemanticRouting,
+            CollapseStrategy::Weighted,     // Tier‑5 uses weighted collapse
+            DaxTier::Tier5Cognitive,
+            |s, _| s.clone(),
+        ).await;
 
     println!("Final master state (async): {:?}", new_master);
+
+    println!("Agent Heat: {:?}", telemetry.agent_heat);
+    println!("Delta Heat: {:?}", telemetry.delta_heat);
+    println!("Influence Edges: {:?}", telemetry.influence_edges);
+    println!("Collapse Order: {:?}", telemetry.collapse_order);
+
+    println!("Ledger Entries: {:?}", ledger.entries);
 }
 
 #[cfg(not(feature = "with-async"))]
@@ -185,17 +196,29 @@ fn main() {
         Task::new("root", "1"),
     ];
 
-    let new_master = dax_run_sync(
-        &agent,
-        &executor,
-        master,
-        tasks,
-        SplitStrategy::SemanticRouting,
-        CollapseStrategy::Sequential,
-        |s, _| s.clone(),
-    );
+    // --- MAX‑TIER: returns (state, telemetry, ledger) ---
+    let (new_master, telemetry, ledger): (SimpleState, DaxTelemetry, DaxLedger) =
+        dax_run_sync(
+            &agent,
+            &executor,
+            master,
+            tasks,
+            SplitStrategy::SemanticRouting,
+            CollapseStrategy::Weighted,
+            DaxTier::Tier5Cognitive,
+            |s, _| s.clone(),
+        );
 
     println!("Final master state (sync): {:?}", new_master);
+
+    println!("Agent Heat: {:?}", telemetry.agent_heat);
+    println!("Delta Heat: {:?}", telemetry.delta_heat);
+    println!("Influence Edges: {:?}", telemetry.influence_edges);
+    println!("Collapse Order: {:?}", telemetry.collapse_order);
+
+    println!("Ledger Entries: {:?}", ledger.entries);
 }
+
+
 
 

@@ -1,10 +1,13 @@
+============================================================
 DAX Agent Orchestrator — Technical Whitepaper (Production Edition)
+============================================================
+
 Executive Summary
-The DAX Agent Orchestrator is a lightweight, type‑safe Rust framework for decomposing agent workloads into scoped subagents, executing them concurrently or sequentially, and merging their resulting deltas back into a unified master state. The orchestrator is designed for hosts that require full ownership of state semantics, deterministic merging behavior, and runtime‑agnostic execution models.
+The DAX Agent Orchestrator is a lightweight, type-safe Rust framework for decomposing agent workloads into scoped subagents, executing them concurrently or sequentially, and merging their resulting deltas back into a unified master state. The orchestrator is designed for hosts that require full ownership of state semantics, deterministic merging behavior, provenance tracking, and runtime-agnostic execution models.
 
 The system emphasizes:
 
-Host‑defined state and merge logic
+Host-defined state and merge logic
 
 Safe, ergonomic downcasting of deltas
 
@@ -12,65 +15,69 @@ Flexible synchronous and asynchronous execution
 
 Pluggable merge strategies
 
+Tier-aware routing and weighted collapse
+
+Fractal expansion for recursive reasoning
+
+Telemetry and ledger for full observability
+
 Minimal runtime assumptions
 
-This makes the orchestrator suitable for cognitive agents, distributed reasoning systems, simulation engines, and any workload requiring structured decomposition and controlled recomposition.
+This makes the orchestrator suitable for cognitive agents, distributed reasoning systems, simulation engines, and any workload requiring structured decomposition, controlled recomposition, and traceable decision-making.
 
 Background and Motivation
-Modern agents increasingly rely on task decomposition, parallel reasoning, and scoped state views to achieve higher throughput and more robust decision‑making. However, coordinating these subagents — splitting state, executing tasks, collecting results, and merging deltas — is highly host‑specific and often error‑prone.
 
-The DAX Agent Orchestrator addresses this by providing a minimal, extensible, host‑controlled orchestration layer that:
+Modern agents increasingly rely on task decomposition, parallel reasoning, and scoped state views to achieve higher throughput and more robust decision-making. Coordinating these subagents — splitting state, executing tasks, collecting results, and merging deltas — is host-specific and error-prone.
 
-Avoids imposing a state model
+The DAX Agent Orchestrator provides a minimal, extensible, host-controlled orchestration layer that:
 
-Avoids imposing a runtime
+Does not impose a state model
 
-Avoids imposing a merge strategy
+Does not impose a runtime
 
-Avoids imposing serialization formats
+Does not impose a merge strategy
 
-Instead, it provides type‑safe primitives that hosts can assemble into their own orchestration pipelines.
+Does not impose serialization formats
+
+Does not impose global registries
+
+Instead, it provides type-safe primitives that hosts assemble into their own orchestration pipelines, with optional Max‑Tier extensions for provenance, telemetry, and cognitive routing.
 
 Design Goals
-1. Host Ownership of State
-Hosts define:
 
-AgentState
+Host Ownership of State
+Hosts define AgentState and concrete delta types implementing DeltaState. Merging logic remains entirely under host control.
 
-Concrete delta types implementing DeltaState
-
-This ensures merging logic remains entirely under host control.
-
-2. Safe Downcasting
-Deltas are trait objects with:
+Safe Downcasting
+Deltas are trait objects supporting:
 
 as_any()
 
 downcast_ref<T>()
-
 This enables ergonomic, safe inspection of concrete delta types.
 
-3. Flexible Execution Models
-The orchestrator supports:
+Flexible Execution Models
+Supported execution modes:
 
 Pure synchronous execution
 
-Tokio‑backed parallel execution (optional)
+Tokio-backed parallel execution (optional)
 
-Thread‑based fallback parallel execution
-
+Thread-based fallback parallel execution
 No runtime is required.
 
-4. Pluggable Merge Strategies
+Pluggable Merge Strategies
 Hosts may choose:
 
 Sequential merging (collapse)
 
+Weighted merging (Tier2+)
+
 Custom merging (collapse_with)
 
-Provenance‑aware merging (collapse_from_id_pairs)
+Provenance-aware merging (collapse_from_id_pairs)
 
-5. Minimal Assumptions
+Minimal Assumptions
 The orchestrator avoids:
 
 Serialization requirements
@@ -81,25 +88,75 @@ Global registries
 
 Complex scheduling semantics
 
+Max‑Tier Extensions
+
+Tier System
+Tier1Basic: Sequential collapse
+Tier2Weighted: Weighted collapse
+Tier3Adaptive: Semantic routing
+Tier4FractalBoost: Semantic routing + fractal expansion
+Tier5Cognitive: Full Max‑Tier mode including weighted collapse, fractal expansion, telemetry, ledger, influence tracking, and collapse positions
+
+Weighted Collapse
+Allows confidence-weighted or priority-weighted merging of deltas.
+
+Fractal Expansion
+Recursive subagent generation based on depth and cost constraints.
+
+Telemetry
+Tracks:
+
+agent_heat
+
+delta_heat
+
+influence_edges
+
+collapse_order
+
+Ledger
+Tracks:
+
+agent_id
+
+task_name
+
+delta_type
+
+delta_value
+
+depth
+
+cost
+
+collapse_position
+
+influenced
+
+timestamp
+
+Deterministic Replay
+Telemetry + ledger allow full reconstruction of execution order and merge behavior.
+
 Architecture Overview
+
 Core Traits
+
 AgentState
-Host‑defined state with:
+Host-defined state with:
 
 Clone + Send + Debug + 'static
 
 apply_delta(&mut self, delta: &dyn DeltaState)
 
-This is the canonical merge hook.
-
 DeltaState
 Trait object representing a change to state.
 
-Object‑safe
+Object-safe
 
 Supports downcasting
 
-Blanket impl for any Send + Debug + Any + 'static
+Blanket implementation for any Send + Debug + Any + 'static
 
 Task
 Lightweight descriptor containing:
@@ -107,8 +164,7 @@ Lightweight descriptor containing:
 name: String
 
 payload: String
-
-Optional JSON payload when with-serde is enabled
+Optional JSON payload when with-serde is enabled.
 
 SubAgentSpec
 A subagent invocation containing:
@@ -120,63 +176,63 @@ scoped_state: S
 task: Task
 
 AgentExecutor / AgentExecutorAsync
-Host‑implemented execution traits:
+Host-implemented execution traits:
 
 Sync: run(&self, state, task)
 
-Async: run_async(&self, state, task) -> Fut
+Async: run_async(&self, state, task) -> Future
 
 Data Flow
-1. Split
-split(state, strategy, tasks, extract_slice) produces:
 
-Code
+Split
+split(state, strategy, tasks, extract_slice) produces:
 Vec<SubAgentSpec<S>>
 Hosts define how state is partitioned via extract_slice.
 
-2. Execute
+Execute
 Executors run each subagent:
 
 Sync: sequential
 
 Async: parallel (Tokio or threads)
 
-3. Collapse
-Merge deltas back into master state:
+Collapse
+Merge deltas back into master state using:
 
 collapse
 
 collapse_with
 
 collapse_from_id_pairs
-
-Hosts choose merge semantics.
+Weighted collapse and tier-aware routing apply automatically in Max‑Tier mode.
 
 API and Semantics
+
 Split Strategies
 SplitStrategy supports:
 
-Round‑robin partitioning
+Round-robin partitioning
 
-Semantic routing (host‑defined)
+Semantic routing (host-defined or Tier3+)
 
 Collapse Strategies
 CollapseStrategy supports:
 
 Sequential merging
 
-Weighted merging (host‑defined)
+Weighted merging (Tier2+)
 
 Custom Merge Hooks
 collapse_with allows:
 
-Confidence‑weighted merges
+Confidence-weighted merges
 
-Provenance‑aware merges
+Provenance-aware merges
 
 Conflict resolution policies
 
 Execution Models
+
 Synchronous Execution
 run_subagents_local:
 
@@ -196,13 +252,15 @@ Thread fallback otherwise
 Ordering preserved
 
 Safety Guarantees
+
 All state and deltas are Send
 
-All deltas are object‑safe
+All deltas are object-safe
 
-Panicked tasks are skipped by default
+Panicked tasks are isolated and skipped
 
 Metadata and Provenance
+
 SubAgentResult includes:
 
 id
@@ -221,9 +279,37 @@ Executor identifiers
 
 Provenance tags
 
+Telemetry includes:
+
+agent_heat
+
+delta_heat
+
+influence_edges
+
+collapse_order
+
+Ledger includes:
+
+agent_id
+
+delta_type
+
+delta_value
+
+depth
+
+cost
+
+collapse_position
+
+influenced
+
+timestamp
+
 Testing and Integration
-Unit Tests
-Included tests validate:
+
+Unit Tests validate:
 
 Downcasting
 
@@ -232,6 +318,10 @@ Delta application
 Sync and async execution
 
 Collapse semantics
+
+Tier behavior
+
+Ledger and telemetry correctness
 
 Example Host
 examples/host_agent.rs demonstrates:
@@ -242,18 +332,20 @@ Implementing executors
 
 Sync and async orchestration
 
+Tier5Cognitive usage
+
+Telemetry and ledger inspection
+
 Merge strategies
 
-Recommended Test Matrix
+Recommended Test Matrix:
 cargo test
-
 cargo test --features "with-async"
-
-Integration tests with real host state
+cargo test --features "with-serde"
 
 Performance Considerations
-Microbenchmarks
-Measure:
+
+Microbenchmarks measure:
 
 Split cost (clone vs view)
 
@@ -261,20 +353,27 @@ Executor throughput
 
 Collapse cost
 
-Parallelism Tradeoffs
+Parallelism Tradeoffs:
+
 Tokio for high concurrency
 
 Threads for simple parallelism
 
-Optimization Tips
+Optimization Tips:
+
 Use lightweight scoped states
 
 Batch small tasks
 
 Use metadata for selective recomputation
 
+Use weighted collapse for confidence-based merging
+
+Use fractal expansion for deeper reasoning
+
 Integration Guidance
-Adopting in an Existing Host
+
+Adopting in an Existing Host:
 Implement:
 
 AgentState
@@ -287,23 +386,29 @@ Split logic
 
 Collapse strategy
 
-Serialization
+Tier selection
+
+Telemetry and ledger inspection
+
+Serialization:
 Optional via with-serde.
 
-Cross‑Language Integration
-Use JSON/protobuf for:
+Cross-Language Integration:
+Use JSON or protobuf for:
 
 Task payloads
 
 Delta payloads
 
 Roadmap
-Planned Extensions
-Provenance‑aware merging
+
+Planned Extensions:
+
+Provenance-aware merging
 
 Conflict resolution policies
 
-Priority‑based scheduling
+Priority-based scheduling
 
 Observability hooks
 
@@ -311,29 +416,31 @@ Typed delta registry
 
 Language bindings
 
+Predictive Tier‑6 routing
+
+Graphviz influence graph export
+
+Semantic ledger summarization
+
 Appendix
-Key Types
+
+Key Types:
 AgentState
-
 DeltaState
-
 Task
-
 SubAgentSpec
-
 AgentExecutor
-
 AgentExecutorAsync
+DaxTier
+DaxTelemetry
+DaxLedger
 
-Helper Functions
+Helper Functions:
 split
-
 collapse
-
 collapse_with
-
 collapse_from_id_pairs
-
 run_subagents_local
-
 run_subagents_parallel
+dax_run_sync
+dax_run_async
