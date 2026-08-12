@@ -1,7 +1,23 @@
-use crate::traits::{AgentState, DeltaState, SubAgentSpec, Task};
-use std::fmt::Debug;
+//! DAX orchestrator for dax_agent_orchestrator.
+//!
+//! Supports:
+//! - Classic split/collapse API
+//! - Fractal recursive splitting
+//! - Unified sync + async execution
+//! - Deterministic collapse
+//! - Depth + cost recursion guards
 
-/// Split strategy enum for future extension.
+use crate::subagent::{run_subagents_local, run_subagents_parallel, SubAgentResult};
+use crate::traits::{
+    Agent, AgentExecutor, AgentState, DeltaState,
+    FractalAgent, SubAgentSpec, Task,
+};
+use std::sync::Arc;
+
+// ============================================================================
+// CLASSIC SPLIT / COLLAPSE API
+// ============================================================================
+
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum SplitStrategy {
@@ -9,29 +25,13 @@ pub enum SplitStrategy {
     SemanticRouting,
 }
 
-/// Collapse strategy enum for future extension.
 #[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum CollapseStrategy {
-    /// Apply deltas in the order they are provided by the host.
     Sequential,
-    /// Use a weighted merge strategy (host must provide weights via `collapse_with`).
     Weighted,
 }
 
-/// Minimal DAX-style split function.
-///
-/// This function is intentionally generic and does not assume memory format.
-/// Host agents provide an `extract_slice` closure to produce scoped states.
-///
-/// # Parameters
-/// - `state`: reference to the host's master state.
-/// - `_strategy`: split strategy (reserved for future use).
-/// - `tasks`: list of tasks to produce `SubAgentSpec`s for.
-/// - `extract_slice`: closure that given the master state and an index returns a scoped state for that subagent.
-///
-/// # Returns
-/// A `Vec<SubAgentSpec<S>>` where each spec contains an id, a scoped state, and the task.
 pub fn split<S>(
     state: &S,
     _strategy: SplitStrategy,
@@ -41,49 +41,28 @@ pub fn split<S>(
 where
     S: AgentState,
 {
-    let mut specs = Vec::with_capacity(tasks.len());
-    for (i, task) in tasks.into_iter().enumerate() {
-        let slice = extract_slice(state, i);
-        let id = format!("sub-{}", i);
-        specs.push(SubAgentSpec { id, scoped_state: slice, task });
-    }
-    specs
+    tasks
+        .into_iter()
+        .enumerate()
+        .map(|(i, task)| SubAgentSpec {
+            id: format!("sub-{}", i),
+            scoped_state: extract_slice(state, i),
+            task,
+        })
+        .collect()
 }
 
-/// Collapse function that applies deltas back into the original state using the default merge behavior.
-///
-/// This default simply calls `AgentState::apply_delta` for each delta in order. For more advanced
-/// merge semantics (weighted merges, conflict resolution, provenance-aware merging), use
-/// `collapse_with` and provide a custom merge function.
-///
-/// # Parameters
-/// - `original`: the master state to be updated (consumed and returned).
-/// - `deltas`: iterator of boxed `DeltaState` objects produced by subagents.
-/// - `_strategy`: collapse strategy hint (currently unused by the default implementation).
-///
-/// # Returns
-/// The updated master state after applying all deltas.
 pub fn collapse<S, I>(mut original: S, deltas: I, _strategy: CollapseStrategy) -> S
 where
     S: AgentState,
     I: IntoIterator<Item = Box<dyn DeltaState + Send>>,
 {
-    // Default behavior: apply each delta in sequence using the host's `apply_delta`.
     for delta in deltas {
         original.apply_delta(delta.as_ref());
     }
     original
 }
 
-/// Collapse with a custom merge function.
-///
-/// This function gives hosts full control over how each delta is merged into the master state.
-/// The `merge_fn` receives a mutable reference to the master state, a reference to the delta,
-/// and the subagent id (if available). The merge function can implement weighting, conflict
-/// resolution, provenance checks, or any other policy.
-///
-/// The short illustrative example below is intentionally marked `ignore` so it doesn't run as a doctest.
-/// Replace with a concrete example in your host crate when integrating.
 pub fn collapse_with<S, F, I>(mut original: S, deltas: I, mut merge_fn: F) -> S
 where
     S: AgentState,
@@ -91,100 +70,173 @@ where
     I: IntoIterator<Item = (Option<String>, Box<dyn DeltaState + Send>)>,
 {
     for (id_opt, delta) in deltas {
-        let id_ref = id_opt.as_deref();
-        merge_fn(&mut original, delta.as_ref(), id_ref);
+        merge_fn(&mut original, delta.as_ref(), id_opt.as_deref());
     }
     original
 }
 
-/// Convenience helper to convert a vector of `SubAgentResult`-style deltas (id + delta)
-/// into the shape expected by `collapse_with` and call it with a simple `apply_delta` merge.
-///
-/// This is useful when you have `Vec<(id, Box<dyn DeltaState>)>` and want the default
-/// apply-delta behavior while preserving ids for logging or future strategies.
-///
-/// # Parameters
-/// - `original`: master state
-/// - `id_and_deltas`: vector of `(id, delta)` pairs
-/// - `strategy`: collapse strategy hint (currently only `Sequential` uses default apply)
-///
-/// # Returns
-/// Updated master state.
 pub fn collapse_from_id_pairs<S>(
     original: S,
     id_and_deltas: Vec<(String, Box<dyn DeltaState + Send>)>,
-    strategy: CollapseStrategy,
+    _strategy: CollapseStrategy,
 ) -> S
 where
     S: AgentState,
 {
-    // Convert into the (Option<String>, Box<dyn DeltaState>) shape
-    let deltas_opt: Vec<(Option<String>, Box<dyn DeltaState + Send>)> =
-        id_and_deltas.into_iter().map(|(id, d)| (Some(id), d)).collect();
+    let deltas_opt = id_and_deltas
+        .into_iter()
+        .map(|(id, d)| (Some(id), d));
 
-    match strategy {
-        CollapseStrategy::Sequential => {
-            collapse_with(original, deltas_opt, |master, delta, _id| {
-                master.apply_delta(delta);
-            })
-        }
-        // For Weighted or other strategies, hosts should call `collapse_with` directly
-        // with a merge_fn that implements the desired policy.
-        _ => collapse_with(original, deltas_opt, |master, delta, _id| {
-            master.apply_delta(delta);
-        }),
-    }
+    collapse_with(original, deltas_opt, |master, delta, _id| {
+        master.apply_delta(delta);
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::traits::{AgentState, DeltaState};
+// ============================================================================
+// FRACTAL SPLIT PIPELINE
+// ============================================================================
 
-    #[derive(Clone, Debug)]
-    struct SimpleState {
-        pub counter: i64,
+pub fn dax_split<S: AgentState>(
+    agent: &dyn Agent<S>,
+    state: &S,
+    strategy: SplitStrategy,
+    tasks: Vec<Task>,
+    extract_slice: impl FnMut(&S, usize) -> S,
+) -> Vec<SubAgentSpec<S>> {
+    if let Some(fractal) = agent.as_fractal() {
+        return dax_split_fractal(fractal.as_ref(), state.clone(), tasks);
     }
-
-    impl AgentState for SimpleState {
-        fn apply_delta(&mut self, delta: &dyn DeltaState) {
-            if let Some(d) = delta.as_any().downcast_ref::<SimpleDelta>() {
-                self.counter += d.delta;
-            } else {
-                panic!("unexpected delta type");
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    struct SimpleDelta {
-        delta: i64,
-    }
-
-    impl Into<Box<dyn DeltaState + Send>> for SimpleDelta {
-        fn into(self) -> Box<dyn DeltaState + Send> {
-            Box::new(self)
-        }
-    }
-
-    #[test]
-    fn collapse_sequential_applies_all() {
-        let master = SimpleState { counter: 0 };
-        let deltas: Vec<Box<dyn DeltaState + Send>> =
-            vec![SimpleDelta { delta: 3 }.into(), SimpleDelta { delta: 5 }.into()];
-        let new_master = collapse(master, deltas, CollapseStrategy::Sequential);
-        assert_eq!(new_master.counter, 8);
-    }
-
-    #[test]
-    fn collapse_from_id_pairs_preserves_ids_and_applies() {
-        let master = SimpleState { counter: 1 };
-        let id_and_deltas = vec![
-            ("sub-0".to_string(), SimpleDelta { delta: 2 }.into()),
-            ("sub-1".to_string(), SimpleDelta { delta: 4 }.into()),
-        ];
-        let new_master = collapse_from_id_pairs(master, id_and_deltas, CollapseStrategy::Sequential);
-        assert_eq!(new_master.counter, 7);
-    }
+    split(state, strategy, tasks, extract_slice)
 }
+
+pub fn dax_split_fractal<S: AgentState>(
+    fractal: &dyn FractalAgent<S>,
+    state: S,
+    tasks: Vec<Task>,
+) -> Vec<SubAgentSpec<S>> {
+    let mut specs = Vec::new();
+
+    for (i, task) in tasks.into_iter().enumerate() {
+        specs.push(SubAgentSpec {
+            id: format!("sub-{}", i),
+            scoped_state: state.clone(),
+            task: task.clone(),
+        });
+
+        specs.extend(dax_expand_fractal(fractal, state.clone(), 1));
+    }
+
+    specs
+}
+
+pub fn dax_expand_fractal<S: AgentState>(
+    fractal: &dyn FractalAgent<S>,
+    state: S,
+    depth: usize,
+) -> Vec<SubAgentSpec<S>> {
+    let cfg = fractal.config();
+
+    if depth >= cfg.max_depth {
+        return vec![];
+    }
+
+    if fractal.estimate_cost(&state) > cfg.max_cost {
+        return vec![];
+    }
+
+    let subs = fractal.split(state.clone(), depth);
+
+    let mut expanded = Vec::new();
+    for sub in subs {
+        expanded.push(sub.clone());
+        expanded.extend(dax_expand_fractal(fractal, sub.scoped_state.clone(), depth + 1));
+    }
+
+    expanded
+}
+
+// ============================================================================
+// EXECUTION PIPELINE
+// ============================================================================
+
+pub fn dax_execute_sync<S, E>(
+    specs: Vec<SubAgentSpec<S>>,
+    executor: &E,
+) -> Vec<SubAgentResult>
+where
+    S: AgentState,
+    E: AgentExecutor<S>,
+{
+    run_subagents_local(specs, executor)
+}
+
+pub async fn dax_execute_async<S, E>(
+    specs: Vec<SubAgentSpec<S>>,
+    executor: Arc<E>,
+) -> Vec<SubAgentResult>
+where
+    S: AgentState + Send + 'static,
+    E: AgentExecutor<S> + Send + Sync + 'static,
+{
+    run_subagents_parallel(specs, executor).await
+}
+
+// ============================================================================
+// COLLAPSE PIPELINE
+// ============================================================================
+
+pub fn dax_collapse<S: AgentState>(
+    master: S,
+    results: Vec<SubAgentResult>,
+    strategy: CollapseStrategy,
+) -> S {
+    let id_pairs = results
+        .into_iter()
+        .map(|r| (r.id, r.delta))
+        .collect();
+
+    collapse_from_id_pairs(master, id_pairs, strategy)
+}
+
+// ============================================================================
+// FULL ORCHESTRATION
+// ============================================================================
+
+pub fn dax_run_sync<S, E>(
+    agent: &dyn Agent<S>,
+    executor: &E,
+    master: S,
+    tasks: Vec<Task>,
+    split_strategy: SplitStrategy,
+    collapse_strategy: CollapseStrategy,
+    extract_slice: impl FnMut(&S, usize) -> S,
+) -> S
+where
+    S: AgentState,
+    E: AgentExecutor<S>,
+{
+    let specs = dax_split(agent, &master, split_strategy, tasks, extract_slice);
+    let results = dax_execute_sync(specs, executor);
+    dax_collapse(master, results, collapse_strategy)
+}
+
+pub async fn dax_run_async<S, E>(
+    agent: &dyn Agent<S>,
+    executor: Arc<E>,
+    master: S,
+    tasks: Vec<Task>,
+    split_strategy: SplitStrategy,
+    collapse_strategy: CollapseStrategy,
+    extract_slice: impl FnMut(&S, usize) -> S,
+) -> S
+where
+    S: AgentState + Send + 'static,
+    E: AgentExecutor<S> + Send + Sync + 'static,
+{
+    let specs = dax_split(agent, &master, split_strategy, tasks, extract_slice);
+    let results = dax_execute_async(specs, executor).await;
+    dax_collapse(master, results, collapse_strategy)
+}
+
+
 

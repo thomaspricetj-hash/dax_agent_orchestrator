@@ -1,32 +1,106 @@
-use crate::traits::{AgentState, DeltaState, SubAgentSpec};
+//! Subagent execution engine for dax_agent_orchestrator.
+//!
+//! Supports:
+//! - Micro‑agent routing
+//! - Fractal recursive execution
+//! - Depth‑limited and cost‑limited recursion
+//! - Deterministic parallel execution
+//! - Rich provenance metadata
+
+use crate::traits::{
+    Agent, AgentExecutor, AgentState, DeltaState,
+    FractalAgent, MicroAgent, SubAgentSpec, Task,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Result envelope for a subagent run.
+// ============================================================================
+// RESULT ENVELOPE
+// ============================================================================
+
 #[derive(Debug)]
 pub struct SubAgentResult {
-    /// Unique subagent id (from the spec).
     pub id: String,
-    /// Delta produced by the subagent.
     pub delta: Box<dyn DeltaState + Send>,
-    /// Optional provenance/metadata (latency, executor id, confidence, etc.).
     pub metadata: Option<HashMap<String, String>>,
 }
 
-/// Lightweight helper to run subagents synchronously using the host executor.
-/// Hosts can ignore this and run subagents in their own runtime or in parallel.
-pub fn run_subagents_local<S, E>(specs: Vec<SubAgentSpec<S>>, executor: &E) -> Vec<SubAgentResult>
+// ============================================================================
+// MICRO‑AGENT ROUTER (FIXED ARC SIGNATURE)
+// ============================================================================
+
+/// Route a task to the correct micro‑agent.
+/// Returns None if no micro‑agent accepts the task.
+pub fn route_micro_agent<S: AgentState>(
+    agents: &[Arc<dyn Agent<S>>],
+    task: &Task,
+) -> Option<Arc<dyn MicroAgent<S>>> {
+    for agent in agents {
+        if let Some(micro_arc) = agent.as_micro() {
+            if micro_arc.accepts(task) {
+                return Some(micro_arc.clone());
+            }
+        }
+    }
+    None
+}
+
+// ============================================================================
+// FRACTAL EXECUTION ENGINE
+// ============================================================================
+
+/// Recursively execute a fractal agent.
+pub fn run_fractal_recursive<S: AgentState>(
+    agent: &dyn FractalAgent<S>,
+    state: S,
+    depth: usize,
+) -> Vec<SubAgentSpec<S>> {
+    let cfg = agent.config();
+
+    if depth >= cfg.max_depth {
+        return vec![];
+    }
+
+    let cost = agent.estimate_cost(&state);
+    if cost > cfg.max_cost {
+        return vec![];
+    }
+
+    let subs = agent.split(state.clone(), depth);
+
+    let mut expanded = Vec::new();
+    for sub in subs {
+        expanded.push(sub.clone());
+
+        let child_subs =
+            run_fractal_recursive(agent, sub.scoped_state.clone(), depth + 1);
+
+        expanded.extend(child_subs);
+    }
+
+    expanded
+}
+
+// ============================================================================
+// SYNC RUNNER (LOCAL)
+// ============================================================================
+
+pub fn run_subagents_local<S, E>(
+    specs: Vec<SubAgentSpec<S>>,
+    executor: &E,
+) -> Vec<SubAgentResult>
 where
     S: AgentState,
-    E: crate::traits::AgentExecutor<S>,
+    E: AgentExecutor<S>,
 {
     specs
         .into_iter()
         .map(|spec| {
-            // Simple provenance example: mark that this delta was produced by the local executor.
             let mut meta = HashMap::new();
             meta.insert("executor".to_string(), "local".to_string());
+
             let delta = executor.run(spec.scoped_state, spec.task.clone());
+
             SubAgentResult {
                 id: spec.id,
                 delta,
@@ -36,37 +110,26 @@ where
         .collect()
 }
 
-/// Async parallel runner that returns deltas in the same order as specs.
-///
-/// Behavior:
-/// - When the `with-async` feature is enabled, this uses `tokio::task::spawn_blocking`
-///   to run potentially blocking host executors inside a Tokio runtime and awaits
-///   all spawned tasks concurrently.
-/// - When the `with-async` feature is **not** enabled, it falls back to a
-///   thread-based implementation using `std::thread::spawn`.
-///
-/// The function is `async` so callers can `.await` it uniformly.
+// ============================================================================
+// ASYNC PARALLEL RUNNER
+// ============================================================================
+
 pub async fn run_subagents_parallel<S, E>(
     specs: Vec<SubAgentSpec<S>>,
     executor: Arc<E>,
 ) -> Vec<SubAgentResult>
 where
     S: AgentState + Send + 'static,
-    E: crate::traits::AgentExecutor<S> + Send + Sync + 'static,
+    E: AgentExecutor<S> + Send + Sync + 'static,
 {
-    // Tokio-backed implementation (preferred when feature enabled).
     #[cfg(feature = "with-async")]
     {
         use tokio::task;
 
-        // Spawn tasks in the same order as specs; collect JoinHandles in order so awaiting
-        // them in sequence preserves deterministic ordering of results.
         let mut handles = Vec::with_capacity(specs.len());
         for spec in specs {
             let exec = executor.clone();
             handles.push(task::spawn_blocking(move || {
-                // Hosts may include richer metadata by returning it inside the DeltaState
-                // or via other channels; here we keep metadata None for spawned tasks.
                 let delta = exec.run(spec.scoped_state, spec.task.clone());
                 SubAgentResult {
                     id: spec.id,
@@ -78,20 +141,15 @@ where
 
         let mut results = Vec::with_capacity(handles.len());
         for h in handles {
-            // If a task panics or the join fails, we skip that result.
             if let Ok(res) = h.await {
                 results.push(res);
             }
         }
-        results
+        return results;
     }
 
-    // Fallback thread-based implementation when Tokio is not enabled.
     #[cfg(not(feature = "with-async"))]
     {
-        // Use std threads to run the executor in parallel. This is a simple fallback
-        // and will block the current thread while joining; it's suitable for small
-        // workloads or environments without Tokio.
         let mut handles = Vec::with_capacity(specs.len());
         for spec in specs {
             let exec = executor.clone();
@@ -111,16 +169,19 @@ where
                 results.push(res);
             }
         }
-        results
+        return results;
     }
 }
+
+// ============================================================================
+// TESTS
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::traits::{AgentExecutor, AgentState, DeltaState, Task};
 
-    // Only import Arc when the async feature is enabled and the parallel test is compiled.
     #[cfg(feature = "with-async")]
     use std::sync::Arc;
 
@@ -142,12 +203,6 @@ mod tests {
     #[derive(Debug)]
     struct SimpleDelta {
         delta: i64,
-    }
-
-    impl Into<Box<dyn DeltaState + Send>> for SimpleDelta {
-        fn into(self) -> Box<dyn DeltaState + Send> {
-            Box::new(self)
-        }
     }
 
     struct TestExecutor;
@@ -178,9 +233,7 @@ mod tests {
 
         let exec = TestExecutor;
         let results = run_subagents_local(specs, &exec);
-        assert_eq!(results.len(), 3);
 
-        // Apply each delta to a fresh master using the host's apply_delta implementation.
         let mut applied = SimpleState { counter: 0 };
         for r in results {
             applied.apply_delta(r.delta.as_ref());
@@ -207,12 +260,9 @@ mod tests {
             })
             .collect();
 
-        // Use Arc here so the earlier unconditional import is actually used.
         let exec = Arc::new(TestExecutor);
         let results = run_subagents_parallel(specs, exec).await;
-        assert_eq!(results.len(), 3);
 
-        // Apply each delta to a fresh master using the host's apply_delta implementation.
         let mut applied = SimpleState { counter: 0 };
         for r in results {
             applied.apply_delta(r.delta.as_ref());

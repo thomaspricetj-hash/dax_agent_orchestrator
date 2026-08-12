@@ -6,18 +6,23 @@
 
 use dax_agent_orchestrator as orchestrator;
 use orchestrator::{
-    AgentState, DeltaState, Task, split, collapse_from_id_pairs, run_subagents_local,
-    SplitStrategy, CollapseStrategy, AgentExecutor, SubAgentResult,
+    Agent, AgentState, DeltaState, MicroAgent, FractalAgent, FractalConfig,
+    Task, SplitStrategy, CollapseStrategy,
 };
-// Only import the parallel runner and Arc when async feature is enabled.
-#[cfg(feature = "with-async")]
-use orchestrator::run_subagents_parallel;
-#[cfg(feature = "with-async")]
-use std::sync::Arc;
 
+#[cfg(not(feature = "with-async"))]
+use orchestrator::dax_run_sync;
+
+#[cfg(feature = "with-async")]
+use orchestrator::dax_run_async;
+
+use std::sync::Arc;
 use std::fmt::Debug;
 
-/// Example concrete AgentState used by this host.
+// ============================================================================
+// STATE + DELTA
+// ============================================================================
+
 #[derive(Clone, Debug)]
 struct SimpleState {
     pub counter: i64,
@@ -25,7 +30,7 @@ struct SimpleState {
 
 impl AgentState for SimpleState {
     fn apply_delta(&mut self, delta: &dyn DeltaState) {
-        if let Some(d) = delta.as_any().downcast_ref::<SimpleDelta>() {
+        if let Some(d) = delta.downcast_ref::<SimpleDelta>() {
             self.counter += d.delta;
         } else {
             eprintln!("apply_delta: unknown delta type {:?}", delta);
@@ -33,94 +38,164 @@ impl AgentState for SimpleState {
     }
 }
 
-/// Concrete DeltaState for this example.
 #[derive(Debug)]
 struct SimpleDelta {
     delta: i64,
 }
 
-/// Host executor that runs a subagent given scoped state and task.
-struct HostExecutor;
-impl AgentExecutor<SimpleState> for HostExecutor {
-    fn run(&self, _state: SimpleState, task: Task) -> Box<dyn DeltaState + Send> {
-        println!("Running subagent {} with payload {:?}", task.name, task.payload);
+// ============================================================================
+// MICRO‑AGENT IMPLEMENTATION
+// ============================================================================
+
+#[derive(Debug)]
+struct IncrementAgent;
+
+impl MicroAgent<SimpleState> for IncrementAgent {
+    fn accepts(&self, task: &Task) -> bool {
+        task.name.starts_with("inc")
+    }
+
+    fn execute(&self, _state: SimpleState, task: Task) -> Box<dyn DeltaState + Send> {
         let inc = task.payload.parse::<i64>().unwrap_or(1);
+        println!("[micro] incrementing by {}", inc);
         Box::new(SimpleDelta { delta: inc })
     }
 }
 
+// ============================================================================
+// FRACTAL AGENT IMPLEMENTATION
+// ============================================================================
+
+#[derive(Debug)]
+struct RecursiveAgent;
+
+impl FractalAgent<SimpleState> for RecursiveAgent {
+    fn split(&self, state: SimpleState, depth: usize)
+        -> Vec<orchestrator::SubAgentSpec<SimpleState>>
+    {
+        let next = depth as i64;
+        let task = Task::new(format!("inc-depth-{}", depth), next.to_string());
+
+        vec![orchestrator::SubAgentSpec {
+            id: format!("fractal-{}", depth),
+            scoped_state: state.clone(),
+            task,
+        }]
+    }
+
+    fn estimate_cost(&self, _state: &SimpleState) -> usize {
+        1
+    }
+
+    fn config(&self) -> FractalConfig {
+        FractalConfig {
+            max_depth: 3,
+            max_cost: 128,
+        }
+    }
+}
+
+// ============================================================================
+// UNIFIED AGENT IMPLEMENTATION
+// ============================================================================
+
+#[derive(Debug)]
+struct HostAgent {
+    micro: Arc<IncrementAgent>,
+    fractal: Arc<RecursiveAgent>,
+}
+
+impl Agent<SimpleState> for HostAgent {
+    fn as_micro(&self) -> Option<Arc<dyn MicroAgent<SimpleState>>> {
+        Some(self.micro.clone())
+    }
+
+    fn as_fractal(&self) -> Option<Arc<dyn FractalAgent<SimpleState>>> {
+        Some(self.fractal.clone())
+    }
+}
+
+// ============================================================================
+// EXECUTOR
+// ============================================================================
+
+#[derive(Debug)]
+struct HostExecutor;
+
+impl orchestrator::AgentExecutor<SimpleState> for HostExecutor {
+    fn run(&self, _state: SimpleState, task: Task) -> Box<dyn DeltaState + Send> {
+        println!("[executor] running {} with payload {:?}", task.name, task.payload);
+
+        if task.name.starts_with("inc") {
+            let inc = task.payload.parse::<i64>().unwrap_or(1);
+            return Box::new(SimpleDelta { delta: inc });
+        }
+
+        Box::new(SimpleDelta { delta: 1 })
+    }
+}
+
+// ============================================================================
+// MAIN (SYNC + ASYNC)
+// ============================================================================
+
 #[cfg(feature = "with-async")]
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
+    let agent = HostAgent {
+        micro: Arc::new(IncrementAgent),
+        fractal: Arc::new(RecursiveAgent),
+    };
+
+    let executor = Arc::new(HostExecutor);
+
     let master = SimpleState { counter: 0 };
     let tasks = vec![
-        Task::new("A", "3"),
-        Task::new("B", "5"),
-        Task::new("C", "2"),
+        Task::new("inc-A", "3"),
+        Task::new("inc-B", "5"),
+        Task::new("root", "1"),
     ];
 
-    // Create subagent specs by cloning the master state for each subagent.
-    // Real hosts should provide semantic slicing here.
-    let specs = split(&master, SplitStrategy::SemanticRouting, tasks, |s, _i| s.clone());
+    let new_master = dax_run_async(
+        &agent,
+        executor,
+        master,
+        tasks,
+        SplitStrategy::SemanticRouting,
+        CollapseStrategy::Sequential,
+        |s, _| s.clone(),
+    ).await;
 
-    // --- Synchronous run ---
-    let executor = HostExecutor;
-    let results: Vec<SubAgentResult> = run_subagents_local(specs.clone(), &executor);
-
-    // Optionally inspect metadata or ids
-    for r in &results {
-        println!("Sync result id: {}, metadata: {:?}", r.id, r.metadata);
-    }
-
-    // Convert to (id, delta) pairs and collapse preserving ids
-    let id_and_deltas_sync: Vec<(String, Box<dyn DeltaState + Send>)> =
-        results.into_iter().map(|r| (r.id, r.delta)).collect();
-
-    let new_master_sync = collapse_from_id_pairs(master.clone(), id_and_deltas_sync, CollapseStrategy::Sequential);
-    println!("New master state (sync collapse): {:?}", new_master_sync);
-
-    // --- Parallel run (Tokio-backed) ---
-    // These imports are only present when the with-async feature is enabled,
-    // so this code path is compiled only in that configuration.
-    let executor_arc = Arc::new(HostExecutor);
-    let results_par: Vec<SubAgentResult> = run_subagents_parallel(specs, executor_arc).await;
-
-    for r in &results_par {
-        println!("Parallel result id: {}, metadata: {:?}", r.id, r.metadata);
-    }
-
-    let id_and_deltas_par: Vec<(String, Box<dyn DeltaState + Send>)> =
-        results_par.into_iter().map(|r| (r.id, r.delta)).collect();
-
-    let new_master_par = collapse_from_id_pairs(master, id_and_deltas_par, CollapseStrategy::Sequential);
-    println!("New master state (parallel collapse): {:?}", new_master_par);
+    println!("Final master state (async): {:?}", new_master);
 }
 
 #[cfg(not(feature = "with-async"))]
 fn main() {
-    // Non-async build: run only the synchronous runner to avoid requiring a runtime.
+    let agent = HostAgent {
+        micro: Arc::new(IncrementAgent),
+        fractal: Arc::new(RecursiveAgent),
+    };
+
+    let executor = HostExecutor;
+
     let master = SimpleState { counter: 0 };
     let tasks = vec![
-        Task::new("A", "3"),
-        Task::new("B", "5"),
-        Task::new("C", "2"),
+        Task::new("inc-A", "3"),
+        Task::new("inc-B", "5"),
+        Task::new("root", "1"),
     ];
 
-    let specs = split(&master, SplitStrategy::SemanticRouting, tasks, |s, _i| s.clone());
+    let new_master = dax_run_sync(
+        &agent,
+        &executor,
+        master,
+        tasks,
+        SplitStrategy::SemanticRouting,
+        CollapseStrategy::Sequential,
+        |s, _| s.clone(),
+    );
 
-    // Synchronous run
-    let executor = HostExecutor;
-    let results: Vec<SubAgentResult> = run_subagents_local(specs.clone(), &executor);
-
-    for r in &results {
-        println!("Sync result id: {}, metadata: {:?}", r.id, r.metadata);
-    }
-
-    let id_and_deltas_sync: Vec<(String, Box<dyn DeltaState + Send>)> =
-        results.into_iter().map(|r| (r.id, r.delta)).collect();
-
-    let new_master_sync = collapse_from_id_pairs(master, id_and_deltas_sync, CollapseStrategy::Sequential);
-    println!("New master state (sync collapse): {:?}", new_master_sync);
-
-    // Note: to exercise the parallel runner enable the with-async feature and run with Tokio.
+    println!("Final master state (sync): {:?}", new_master);
 }
+
+

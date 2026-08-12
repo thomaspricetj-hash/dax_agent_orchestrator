@@ -1,26 +1,68 @@
 //! dax_agent_orchestrator
 //!
-//! Public API re-exports and feature-gated items for consumers and examples.
+//! Public API re-exports for consumers, hosts, and examples.
 
 pub mod traits;
 pub mod dax;
 pub mod subagent;
 
-/// Core trait and types
+// ============================================================================
+// CORE TRAITS + TYPES
+// ============================================================================
+
 pub use crate::traits::{
-    AgentState, DeltaState, SubAgentSpec, Task, AgentExecutor, AgentExecutorAsync, BoxDeltaFuture,
+    AgentState,
+    DeltaState,
+    SubAgentSpec,
+    Task,
+    AgentExecutor,
+    AgentExecutorAsync,
+    BoxDeltaFuture,
+
+    Agent,
+    MicroAgent,
+    FractalAgent,
+    FractalConfig,
+    AgentTree,
 };
 
-/// DAX helpers: split / collapse and advanced collapse helpers
+// ============================================================================
+// DAX ORCHESTRATION PIPELINE (ONLY WHAT EXISTS IN THIS PROJECT)
+// ============================================================================
+
 pub use crate::dax::{
-    split, collapse, collapse_with, collapse_from_id_pairs, SplitStrategy, CollapseStrategy,
+    SplitStrategy,
+    CollapseStrategy,
+
+    // These DO exist in your agent project's dax.rs
+    dax_split,
+    dax_split_fractal,
+    dax_expand_fractal,
+    dax_execute_sync,
+    dax_execute_async,
+    dax_collapse,
+    dax_run_sync,
+    dax_run_async,
 };
 
-/// Subagent runners and result envelope
-pub use crate::subagent::{run_subagents_local, run_subagents_parallel, SubAgentResult};
+// ============================================================================
+// SUBAGENT RUNNERS
+// ============================================================================
 
-/// Optional re-exports when serde feature is enabled
+pub use crate::subagent::{
+    run_subagents_local,
+    run_subagents_parallel,
+    SubAgentResult,
+};
+
+// ============================================================================
+// OPTIONAL SERDE SUPPORT
+// ============================================================================
+
 #[cfg(feature = "with-serde")]
 pub use serde;
+
 #[cfg(feature = "with-serde")]
 pub use serde_json;
+
+
