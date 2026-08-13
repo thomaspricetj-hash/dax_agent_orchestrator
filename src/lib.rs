@@ -1,80 +1,48 @@
-//! dax_agent_orchestrator
+//! SyntheticMind MAX‑TIER Cognitive Engine
 //!
-//! Public API re-exports for consumers, hosts, and examples.
+//! Public API surface for the full agent orchestration system.
+//!
+//! Exposes:
+//! - Core trait system
+//! - Delta system
+//! - Merge engine
+//! - Collapse engine
+//! - Agent tree + fractal recursion
+//! - DAX orchestrator
+//! - Subagent execution engine
 
-pub mod traits;
-pub mod dax;
-pub mod subagent;
-
-// ============================================================================
-// CORE TRAITS + TYPES
-// ============================================================================
-
-pub use crate::traits::{
-    AgentState,
-    DeltaState,
-    SubAgentSpec,
-    Task,
-    AgentExecutor,
-    AgentExecutorAsync,
-    BoxDeltaFuture,
-
-    Agent,
-    MicroAgent,
-    FractalAgent,
-    FractalConfig,
-    AgentTree,
-};
+pub mod core;
+pub mod engine;
 
 // ============================================================================
-// DAX ORCHESTRATION PIPELINE (FULL MAX‑TIER EXPORTS)
+// CORE RE‑EXPORTS
 // ============================================================================
 
-pub use crate::dax::{
-    // Strategies
-    SplitStrategy,
-    CollapseStrategy,
+// All traits (agent, micro, fractal, reflection, collapse, merge, cost, etc.)
+pub use core::traits::*;
 
-    // Max‑Tier Production Mode
-    DaxTier,
-    DaxTelemetry,
-    DaxLedger,        // <-- PATCH: Ledger now exported
+// Delta system
+#[allow(unused_imports)]
+pub use core::traits::delta::*;
 
-    // Split pipeline
-    dax_split,
-    dax_split_fractal,
-    dax_expand_fractal,
+// Merge engine
+#[allow(unused_imports)]
+pub use core::traits::merge::*;
 
-    // Execution pipeline
-    dax_execute_sync,
-    dax_execute_async,
+// Collapse engine
+#[allow(unused_imports)]
+pub use core::traits::collapse::*;
 
-    // Collapse pipeline
-    dax_collapse,
-
-    // Full orchestration (now returns ledger)
-    dax_run_sync,
-    dax_run_async,
-};
+// Agent tree
+pub use core::agent_tree::*;
 
 // ============================================================================
-// SUBAGENT RUNNERS
+// ENGINE RE‑EXPORTS
 // ============================================================================
 
-pub use crate::subagent::{
-    run_subagents_local,
-    run_subagents_parallel,
-    SubAgentResult,
-};
+// DAX orchestrator
+pub use engine::dax::*;
 
-// ============================================================================
-// OPTIONAL SERDE SUPPORT
-// ============================================================================
-
-#[cfg(feature = "with-serde")]
-pub use serde;
-
-#[cfg(feature = "with-serde")]
-pub use serde_json;
-
+// Subagent execution engine
+pub use engine::subagent::*;
 

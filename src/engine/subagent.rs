@@ -1,24 +1,20 @@
-//! HostAgent — MAX‑TIER unified agent
+//! Subagent — MAX‑TIER execution unit
 //!
-//! This is the top‑level agent that SyntheticMind uses.
-//!
-//! It wraps:
+//! Implements:
+//! - Unified Agent<S>
 //! - Micro‑agent routing
-//! - Fractal recursion
 //! - Reflection gating
-//! - Scratchpad memory
-//! - Do‑Not‑Do safety graph
-//! - Collapse strategy
-//! - Merge strategy
+//! - Fractal recursion hooks
+//! - Collapse + merge integration
 //! - Cost prediction
-//! - Executor dispatch
+//! - Scratchpad + DND safety
 //!
-//! This is the “brain” that the DAX orchestrator calls.
+//! This is the “worker agent” used by the DAX orchestrator.
 
-use std::fmt;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
-use dax_agent_orchestrator::core::traits::{
+use crate::core::traits::{
     Agent,
     AgentState,
     Task,
@@ -39,15 +35,16 @@ use dax_agent_orchestrator::core::traits::{
     FractalSplit,
     Scratchpad,
     DoNotDoGraph,
+    micro::MicroRouteDecision,
 };
 
-use dax_agent_orchestrator::core::traits::delta::DeltaState;
+use crate::core::traits::delta::DeltaState;
 
 // ============================================================================
-// HOST AGENT STRUCTURE
+// SUBAGENT STRUCTURE
 // ============================================================================
 
-pub struct HostAgent<S: AgentState> {
+pub struct SubAgent<S: AgentState> {
     pub name: String,
 
     pub collapse: Arc<dyn CollapseStrategy<S> + Send + Sync>,
@@ -59,7 +56,22 @@ pub struct HostAgent<S: AgentState> {
     pub dnd: DoNotDoGraph,
 }
 
-impl<S: AgentState> HostAgent<S> {
+// Manual Debug implementation (fixes E0277)
+impl<S: AgentState> Debug for SubAgent<S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubAgent")
+            .field("name", &self.name)
+            .field("collapse", &"<dyn CollapseStrategy>")
+            .field("merge", &"<dyn MergeStrategy>")
+            .field("cost", &"<dyn CostPredictor>")
+            .field("executor", &"<dyn AgentExecutor>")
+            .field("scratchpad", &self.scratchpad)
+            .field("dnd", &self.dnd)
+            .finish()
+    }
+}
+
+impl<S: AgentState> SubAgent<S> {
     pub fn new(
         name: impl Into<String>,
         collapse: Arc<dyn CollapseStrategy<S> + Send + Sync>,
@@ -79,36 +91,21 @@ impl<S: AgentState> HostAgent<S> {
     }
 }
 
-// Provide a compact Debug impl that doesn't require the trait objects to be Debug.
-impl<S: AgentState> fmt::Debug for HostAgent<S> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HostAgent")
-            .field("name", &self.name)
-            .field("scratchpad_present", &true)
-            .field("dnd_present", &true)
-            .finish()
-    }
-}
-
 // ============================================================================
 // MICRO‑AGENT ACCEPTANCE
 // ============================================================================
 
-impl<S: AgentState> MicroAgentAcceptance<S> for HostAgent<S> {
-    fn should_accept(
-        &self,
-        _state: &S,
-        task: &Task,
-    ) -> dax_agent_orchestrator::core::traits::micro::MicroRouteDecision {
+impl<S: AgentState> MicroAgentAcceptance<S> for SubAgent<S> {
+    fn should_accept(&self, _state: &S, task: &Task) -> MicroRouteDecision {
         if let Some(reason) = self.dnd.is_forbidden(task) {
-            return dax_agent_orchestrator::core::traits::micro::MicroRouteDecision::reject(Some(reason));
+            return MicroRouteDecision::reject(Some(reason));
         }
 
-        dax_agent_orchestrator::core::traits::micro::MicroRouteDecision::accept(None)
+        MicroRouteDecision::accept(None)
     }
 
     fn priority(&self) -> f32 {
-        10.0 // host agent has highest priority
+        1.0
     }
 
     fn name(&self) -> Option<String> {
@@ -120,12 +117,10 @@ impl<S: AgentState> MicroAgentAcceptance<S> for HostAgent<S> {
 // MICRO‑AGENT EXECUTION
 // ============================================================================
 
-impl<S: AgentState> MicroAgentExecutor<S> for HostAgent<S> {
-    fn execute(
-        &self,
-        state: &S,
-        task: &Task,
-    ) -> Box<dyn DeltaState + Send> {
+impl<S: AgentState> MicroAgentExecutor<S> for SubAgent<S> {
+    fn execute(&self, state: &S, task: &Task) -> Box<dyn DeltaState + Send> {
+        // AgentExecutor::run is expected to take owned state/task or clones;
+        // we clone here to match the common executor signature used elsewhere.
         self.executor.run(state.clone(), task.clone())
     }
 }
@@ -134,17 +129,13 @@ impl<S: AgentState> MicroAgentExecutor<S> for HostAgent<S> {
 // MICRO‑AGENT FALLBACK
 // ============================================================================
 
-impl<S: AgentState> MicroAgentFallback<S> for HostAgent<S> {
-    fn fallback(
-        &self,
-        _state: &S,
-        _task: &Task,
-    ) -> Option<Box<dyn DeltaState + Send>> {
+impl<S: AgentState> MicroAgentFallback<S> for SubAgent<S> {
+    fn fallback(&self, _state: &S, _task: &Task) -> Option<Box<dyn DeltaState + Send>> {
         None
     }
 
     fn reason(&self) -> Option<String> {
-        Some("HostAgent fallback not implemented".to_string())
+        Some("fallback not implemented".to_string())
     }
 }
 
@@ -152,19 +143,9 @@ impl<S: AgentState> MicroAgentFallback<S> for HostAgent<S> {
 // FRACTAL AGENT
 // ============================================================================
 
-impl<S: AgentState> FractalAgent<S> for HostAgent<S> {
-    fn split_task(
-        &self,
-        _state: &S,
-        task: &Task,
-        _depth: usize,
-    ) -> Option<FractalSplit> {
-        // Default: host agent does not split tasks
+impl<S: AgentState> FractalAgent<S> for SubAgent<S> {
+    fn split_task(&self, _state: &S, task: &Task, _depth: usize) -> Option<FractalSplit> {
         Some(FractalSplit::new(vec![task.clone()]))
-    }
-
-    fn max_fractal_depth(&self) -> usize {
-        32
     }
 }
 
@@ -172,19 +153,11 @@ impl<S: AgentState> FractalAgent<S> for HostAgent<S> {
 // REFLECTIVE AGENT
 // ============================================================================
 
-impl<S: AgentState> ReflectiveAgent<S> for HostAgent<S> {
-    fn reflect(
-        &self,
-        _state: &S,
-        task: &Task,
-    ) -> ReflectionData {
+impl<S: AgentState> ReflectiveAgent<S> for SubAgent<S> {
+    fn reflect(&self, _state: &S, task: &Task) -> ReflectionData {
         let mut r = ReflectionData::new();
-        r.assumptions.push(format!("HostAgent assumes '{}' is valid", task.name));
+        r.assumptions.push(format!("Task '{}' is safe", task.name));
         r
-    }
-
-    fn max_reflection_depth(&self) -> usize {
-        8
     }
 }
 
@@ -192,7 +165,7 @@ impl<S: AgentState> ReflectiveAgent<S> for HostAgent<S> {
 // SCRATCHPAD AGENT
 // ============================================================================
 
-impl<S: AgentState> ScratchpadAgent<S> for HostAgent<S> {
+impl<S: AgentState> ScratchpadAgent<S> for SubAgent<S> {
     fn scratchpad(&self) -> &Scratchpad {
         &self.scratchpad
     }
@@ -206,7 +179,7 @@ impl<S: AgentState> ScratchpadAgent<S> for HostAgent<S> {
 // DND AGENT
 // ============================================================================
 
-impl<S: AgentState> DoNotDoAgent<S> for HostAgent<S> {
+impl<S: AgentState> DoNotDoAgent<S> for SubAgent<S> {
     fn dnd_graph(&self) -> &DoNotDoGraph {
         &self.dnd
     }
@@ -220,7 +193,7 @@ impl<S: AgentState> DoNotDoAgent<S> for HostAgent<S> {
 // CAPABILITY INTROSPECTION
 // ============================================================================
 
-impl<S: AgentState> CapabilityIntrospection<S> for HostAgent<S> {
+impl<S: AgentState> CapabilityIntrospection<S> for SubAgent<S> {
     fn capabilities(&self) -> AgentCapabilities {
         let mut c = AgentCapabilities::new();
         c.can_reflect = true;
@@ -238,7 +211,7 @@ impl<S: AgentState> CapabilityIntrospection<S> for HostAgent<S> {
 // UNIFIED AGENT IMPLEMENTATION
 // ============================================================================
 
-impl<S: AgentState> Agent<S> for HostAgent<S> {
+impl<S: AgentState> Agent<S> for SubAgent<S> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -259,19 +232,3 @@ impl<S: AgentState> Agent<S> for HostAgent<S> {
         self.executor.clone()
     }
 }
-
-// ============================================================================
-// Example entrypoint for the example binary
-// ============================================================================
-
-fn main() {
-    // Minimal smoke test for the example binary.
-    // This example intentionally does not construct a full HostAgent because
-    // that requires concrete AgentState and executor implementations.
-    println!("host_agent example: HostAgent type compiled and ready.");
-}
-
-
-
-
-
